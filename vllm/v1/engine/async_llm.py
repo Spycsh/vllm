@@ -54,6 +54,7 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+PD_TRACE = bool(int(os.environ.get("VLLM_PD_TRACE", "0")))
 
 
 class InputStreamError(Exception):
@@ -406,11 +407,28 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
+        trace_start = time.perf_counter() if PD_TRACE else 0.0
+        if PD_TRACE:
+            kv_transfer_params = getattr(request, "kv_transfer_params", None)
+            logger.info(
+                "PD_TRACE async_add_start request_id=%s prompt_tokens=%s "
+                "kv_transfer=%s",
+                request.request_id,
+                getattr(request, "num_tokens", None),
+                kv_transfer_params is not None,
+            )
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
+
+        if PD_TRACE:
+            logger.info(
+                "PD_TRACE async_add_done request_id=%s engine_add_ms=%.2f",
+                request.request_id,
+                (time.perf_counter() - trace_start) * 1000,
+            )
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)

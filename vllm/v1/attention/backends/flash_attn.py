@@ -943,6 +943,22 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
 
+            if not getattr(FlashAttentionImpl, "_debug_printed_fp8_runtime", False):
+                FlashAttentionImpl._debug_printed_fp8_runtime = True
+                print(
+                    "FLASH_ATTN runtime:",
+                    "kv_cache_dtype=", self.kv_cache_dtype,
+                    "supports_quant_query_input=", self.supports_quant_query_input,
+                    "query.dtype=", query.dtype,
+                    "key_cache.dtype=", key_cache.dtype,
+                    "value_cache.dtype=", value_cache.dtype,
+                    "output.dtype=", output.dtype,
+                    "q_descale=", q_descale is not None,
+                    "k_descale=", k_descale is not None,
+                    "v_descale=", v_descale is not None,
+                    flush=True,
+                )
+
             if self.dcp_world_size > 1:
                 self._forward_with_dcp(
                     query[:num_actual_tokens],
@@ -1119,6 +1135,20 @@ class FlashAttentionImpl(AttentionImpl):
         # and value[:num_actual_tokens] because the reshape_and_cache_flash
         # op uses the slot_mapping's shape to determine the number of
         # actual tokens.
+        if not getattr(FlashAttentionImpl, "_debug_printed_kv_cache_update", False):
+            FlashAttentionImpl._debug_printed_kv_cache_update = True
+            print(
+                "FLASH_ATTN kv cache update:",
+                "kv_cache_dtype=", self.kv_cache_dtype,
+                "key.dtype=", key.dtype,
+                "value.dtype=", value.dtype,
+                "kv_cache.dtype=", kv_cache.dtype,
+                "key_cache.dtype=", key_cache.dtype,
+                "value_cache.dtype=", value_cache.dtype,
+                "k_scale.dtype=", layer._k_scale.dtype,
+                "v_scale.dtype=", layer._v_scale.dtype,
+                flush=True,
+            )
         reshape_and_cache_flash(
             key,
             value,

@@ -5,6 +5,7 @@ import argparse
 import itertools
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -218,6 +219,7 @@ async def stream_service_response(
 
 async def _handle_completions(api: str, request: Request):
     try:
+        request_start = time.perf_counter()
         req_data = await request.json()
         request_id = str(uuid.uuid4())
 
@@ -225,9 +227,11 @@ async def _handle_completions(api: str, request: Request):
         prefill_client_info = get_next_client(request.app, "prefill")
 
         # Send request to prefill service
+        prefill_start = time.perf_counter()
         response = await send_request_to_service(
             prefill_client_info, api, req_data, request_id
         )
+        prefill_done = time.perf_counter()
 
         # Extract the needed fields
         response_json = response.json()
@@ -241,14 +245,48 @@ async def _handle_completions(api: str, request: Request):
 
         logger.debug("Using %s %s", prefill_client_info, decode_client_info)
 
+        print(
+            "PROXY_TRACE",
+            f"request_id={request_id}",
+            f"api={api}",
+            f"prefill={prefill_client_info['host']}:{prefill_client_info['port']}",
+            f"decode={decode_client_info['host']}:{decode_client_info['port']}",
+            f"prefill_ms={(prefill_done - prefill_start) * 1000:.2f}",
+            f"before_decode_ms={(prefill_done - request_start) * 1000:.2f}",
+            flush=True,
+        )
+
         # Stream response from decode service
         async def generate_stream():
+            decode_start = time.perf_counter()
+            first_chunk = True
+            chunk_count = 0
             async for chunk in stream_service_response(
                 decode_client_info, api, req_data, request_id=request_id
             ):
+                now = time.perf_counter()
+                chunk_count += 1
+                if first_chunk:
+                    first_chunk = False
+                    print(
+                        "PROXY_TRACE",
+                        f"request_id={request_id}",
+                        f"decode_first_chunk_ms={(now - decode_start) * 1000:.2f}",
+                        f"proxy_ttft_ms={(now - request_start) * 1000:.2f}",
+                        flush=True,
+                    )
                 yield chunk
+            done = time.perf_counter()
+            print(
+                "PROXY_TRACE",
+                f"request_id={request_id}",
+                f"decode_stream_ms={(done - decode_start) * 1000:.2f}",
+                f"proxy_total_ms={(done - request_start) * 1000:.2f}",
+                f"chunks={chunk_count}",
+                flush=True,
+            )
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
     except Exception as e:
         import sys

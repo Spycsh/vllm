@@ -173,6 +173,23 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 ep_size=self.moe_config.ep_size,
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
+            # print(
+            #     "XPU FP8 MoE apply:",
+            #     "experts=", type(self).__name__,
+            #     "hidden_states.dtype=", hidden_states.dtype,
+            #     "w1.dtype=", w1.dtype,
+            #     "w1.shape=", tuple(w1.shape),
+            #     "w1.stride=", tuple(w1.stride()),
+            #     "w1_scale.shape=", None if self.w1_scale is None else tuple(self.w1_scale.shape),
+            #     "w2.dtype=", w2.dtype,
+            #     "w2.shape=", tuple(w2.shape),
+            #     "w2.stride=", tuple(w2.stride()),
+            #     "w2_scale.shape=", None if self.w2_scale is None else tuple(self.w2_scale.shape),
+            #     "a1q_scale=", a1q_scale,
+            #     "quant.use_fp8_w8a8=", getattr(self.quant_config, "use_fp8_w8a8", None),
+            #     "quant.use_fp8_w8a16=", getattr(self.quant_config, "use_fp8_w8a16", None),
+            #     flush=True,
+            # )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
             output=output,

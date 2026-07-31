@@ -197,7 +197,16 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
                     # Fallback
                     weight_bf16 = weight_fp8 * weight_scale
             return torch.nn.functional.linear(x, weight_bf16.t(), bias)
-
+        # print(
+        #     "FP8 apply:",
+        #     type(self.fp8_linear).__name__,
+        #     "x.dtype=", x.dtype,
+        #     "weight.dtype=", layer.weight.dtype,
+        #     "weight.shape=", tuple(layer.weight.shape),
+        #     "weight.stride=", tuple(layer.weight.stride()),
+        #     "scale.shape=", tuple(layer.weight_scale.shape),
+        #     flush=True,
+        # )
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
@@ -460,6 +469,24 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 routing_tables=layer._expert_routing_tables(),
                 layer=layer,
             )
+            # print(
+            #     "FP8 MoE setup:",
+            #     "backend=", self.fp8_backend,
+            #     "experts_cls=", self.experts_cls,
+            #     "moe_kernel=", type(self.moe_kernel).__name__,
+            #     "quant_config=", self.moe_quant_config,
+            #     "use_fp8_w8a8=", getattr(self.moe_quant_config, "use_fp8_w8a8", None),
+            #     "use_fp8_w8a16=", getattr(self.moe_quant_config, "use_fp8_w8a16", None),
+            #     "w13.dtype=", layer.w13_weight.dtype,
+            #     "w13.shape=", tuple(layer.w13_weight.shape),
+            #     "w13_scale.shape=", tuple(getattr(layer, f"w13_{self.weight_scale_name}").shape),
+            #     "w13_input_scale=", getattr(layer, "w13_input_scale", None),
+            #     "w2.dtype=", layer.w2_weight.dtype,
+            #     "w2.shape=", tuple(layer.w2_weight.shape),
+            #     "w2_scale.shape=", tuple(getattr(layer, f"w2_{self.weight_scale_name}").shape),
+            #     "w2_input_scale=", getattr(layer, "w2_input_scale", None),
+            #     flush=True,
+            # )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

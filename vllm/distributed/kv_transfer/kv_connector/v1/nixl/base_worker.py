@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+PD_TRACE = bool(int(os.environ.get("VLLM_PD_TRACE", "0")))
 
 
 class NixlBaseConnectorWorker:
@@ -458,6 +459,11 @@ class NixlBaseConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_metadata: dict[ReqId, ReqMeta] = {}
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        self._pd_trace_recv_start: dict[ReqId, float] = {}
+        self._pd_trace_xfer_duration_us = defaultdict[ReqId, list[float]](list)
+        self._pd_trace_xfer_post_us = defaultdict[ReqId, list[float]](list)
+        self._pd_trace_xfer_bytes = defaultdict[ReqId, int](int)
+        self._pd_trace_xfer_descs = defaultdict[ReqId, int](int)
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
         # Set of requests that have been part of a batch, regardless of status.
@@ -1458,6 +1464,15 @@ class NixlBaseConnectorWorker:
             blocks_data = np.concatenate([blocks_data, mamba])
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        if PD_TRACE:
+            logger.info(
+                "PD_TRACE nixl_local_xfer_dlist block_size=%s blocks_data_len=%s "
+                "num_regions=%s num_blocks=%s",
+                block_size,
+                len(blocks_data),
+                self.num_regions,
+                self.num_blocks,
+            )
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
@@ -1563,6 +1578,17 @@ class NixlBaseConnectorWorker:
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
         )
+        if hasattr(self.nixl_wrapper, "make_connection"):
+            self.nixl_wrapper.make_connection(remote_agent_name, self.nixl_backends)
+            if PD_TRACE:
+                logger.info(
+                    "PD_TRACE nixl_make_connection engine_id=%s remote_rank=%s "
+                    "remote_agent=%s backends=%s",
+                    engine_id,
+                    remote_tp_rank,
+                    remote_agent_name,
+                    self.nixl_backends,
+                )
 
         # Create dst descs and xfer side handles. TP workers have same #blocks
         # so we only register once per engine_id.
@@ -1649,6 +1675,16 @@ class NixlBaseConnectorWorker:
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        if PD_TRACE:
+            logger.info(
+                "PD_TRACE nixl_remote_xfer_dlist engine_id=%s remote_rank=%s "
+                "blocks_data_len=%s remote_num_blocks=%s block_size_ratio=%s",
+                engine_id,
+                remote_tp_rank,
+                len(blocks_data),
+                nixl_agent_meta.num_blocks,
+                block_size_ratio,
+            )
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
@@ -1967,6 +2003,27 @@ class NixlBaseConnectorWorker:
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         for req_id in done_recving:
+            if PD_TRACE:
+                recv_start = self._pd_trace_recv_start.pop(req_id, None)
+                if recv_start is not None:
+                    xfer_duration_us = self._pd_trace_xfer_duration_us.pop(req_id, [])
+                    xfer_post_us = self._pd_trace_xfer_post_us.pop(req_id, [])
+                    xfer_bytes = self._pd_trace_xfer_bytes.pop(req_id, 0)
+                    xfer_descs = self._pd_trace_xfer_descs.pop(req_id, 0)
+                    logger.info(
+                        "PD_TRACE nixl_recv_done request_id=%s nixl_recv_ms=%.2f "
+                        "xfer_duration_ms_max=%.3f xfer_duration_ms_sum=%.3f "
+                        "xfer_post_ms_max=%.3f xfer_post_ms_sum=%.3f "
+                        "xfer_bytes=%s xfer_descs=%s",
+                        req_id,
+                        (time.perf_counter() - recv_start) * 1000,
+                        max(xfer_duration_us, default=0) / 1000,
+                        sum(xfer_duration_us) / 1000,
+                        max(xfer_post_us, default=0) / 1000,
+                        sum(xfer_post_us) / 1000,
+                        xfer_bytes,
+                        xfer_descs,
+                    )
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
@@ -2093,6 +2150,13 @@ class NixlBaseConnectorWorker:
                     if xfer_state == "DONE":
                         # Get telemetry from NIXL
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        if PD_TRACE:
+                            self._pd_trace_xfer_duration_us[req_id].append(
+                                res.xferDuration
+                            )
+                            self._pd_trace_xfer_post_us[req_id].append(res.postDuration)
+                            self._pd_trace_xfer_bytes[req_id] += res.totalBytes
+                            self._pd_trace_xfer_descs[req_id] += res.descCount
                         self.xfer_stats.record_transfer(res)
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":

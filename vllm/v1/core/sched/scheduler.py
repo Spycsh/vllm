@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -64,6 +65,7 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+PD_TRACE = bool(int(os.environ.get("VLLM_PD_TRACE", "0")))
 
 
 class Scheduler(SchedulerInterface):
@@ -200,6 +202,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        self._pd_trace_remote_kv_wait_start: dict[str, float] = {}
+        self._pd_trace_remote_kv_ready: dict[str, float] = {}
+        self._pd_trace_post_kv_scheduled: dict[str, float] = {}
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -970,6 +975,17 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    if PD_TRACE:
+                        self._pd_trace_remote_kv_wait_start[request.request_id] = (
+                            time.perf_counter()
+                        )
+                        logger.info(
+                            "PD_TRACE remote_kv_wait_start request_id=%s "
+                            "external_tokens=%s num_tokens=%s",
+                            request.request_id,
+                            num_external_computed_tokens,
+                            request.num_tokens,
+                        )
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
@@ -1016,6 +1032,19 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if PD_TRACE and request_id in self._pd_trace_remote_kv_ready:
+                    ready_time = self._pd_trace_remote_kv_ready[request_id]
+                    self._pd_trace_post_kv_scheduled[request_id] = time.perf_counter()
+                    logger.info(
+                        "PD_TRACE post_kv_scheduled request_id=%s "
+                        "ready_to_scheduled_ms=%.2f num_new_tokens=%s "
+                        "num_computed_tokens=%s num_tokens=%s",
+                        request_id,
+                        (time.perf_counter() - ready_time) * 1000,
+                        num_new_tokens,
+                        num_computed_tokens,
+                        request.num_tokens,
+                    )
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
@@ -1642,6 +1671,20 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
+            if PD_TRACE and req_id in self._pd_trace_post_kv_scheduled:
+                scheduled_time = self._pd_trace_post_kv_scheduled.pop(req_id)
+                ready_time = self._pd_trace_remote_kv_ready.pop(req_id, None)
+                logger.info(
+                    "PD_TRACE post_kv_output request_id=%s "
+                    "scheduled_to_output_ms=%.2f ready_to_output_ms=%.2f "
+                    "num_tokens_scheduled=%s",
+                    req_id,
+                    (time.perf_counter() - scheduled_time) * 1000,
+                    (time.perf_counter() - ready_time) * 1000
+                    if ready_time is not None
+                    else -1,
+                    num_tokens_scheduled,
+                )
             request = self.requests.get(req_id)
             if request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
@@ -2586,7 +2629,20 @@ class Scheduler(SchedulerInterface):
             # in KVConnectorOutput.finished_recving
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
+            if PD_TRACE:
+                wait_start = self._pd_trace_remote_kv_wait_start.pop(
+                    request.request_id, None
+                )
+                if wait_start is not None:
+                    logger.info(
+                        "PD_TRACE remote_kv_wait_done request_id=%s "
+                        "remote_kv_wait_ms=%.2f",
+                        request.request_id,
+                        (time.perf_counter() - wait_start) * 1000,
+                    )
             self._update_waiting_for_remote_kv(request)
+            if PD_TRACE:
+                self._pd_trace_remote_kv_ready[request.request_id] = time.perf_counter()
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:
@@ -2632,6 +2688,11 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                if PD_TRACE:
+                    logger.info(
+                        "PD_TRACE remote_kv_finished_signal request_id=%s",
+                        req_id,
+                    )
                 self.finished_recving_kv_req_ids.add(req_id)
             else:
                 assert RequestStatus.is_finished(req.status)

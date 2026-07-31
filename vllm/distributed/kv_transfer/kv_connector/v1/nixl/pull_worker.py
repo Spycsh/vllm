@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    PD_TRACE,
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -47,6 +48,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
+            if PD_TRACE:
+                logger.info(
+                    "PD_TRACE nixl_start_load request_id=%s local_blocks=%s",
+                    req_id,
+                    len(meta.local_block_ids[0]) if meta.local_block_ids else 0,
+                )
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
@@ -336,6 +343,31 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
 
             # Begin async xfer.
+            if PD_TRACE:
+                self._pd_trace_recv_start.setdefault(request_id, time.perf_counter())
+                logger.info(
+                    "PD_TRACE nixl_transfer_submit request_id=%s remote_rank=%s "
+                    "local_blocks=%s remote_blocks=%s desc_ids=%s "
+                    "local_desc_min=%s local_desc_max=%s "
+                    "remote_desc_min=%s remote_desc_max=%s",
+                    request_id,
+                    remote_rank,
+                    sum(len(blocks) for blocks in local_block_ids),
+                    sum(len(blocks) for blocks in remote_block_ids),
+                    len(local_block_descs_ids),
+                    int(local_block_descs_ids.min())
+                    if len(local_block_descs_ids) > 0
+                    else None,
+                    int(local_block_descs_ids.max())
+                    if len(local_block_descs_ids) > 0
+                    else None,
+                    int(remote_block_descs_ids.min())
+                    if len(remote_block_descs_ids) > 0
+                    else None,
+                    int(remote_block_descs_ids.max())
+                    if len(remote_block_descs_ids) > 0
+                    else None,
+                )
             self.nixl_wrapper.transfer(handle)
 
             # Use handle to check completion in future step().
