@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import os
 import time
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     PD_TRACE,
@@ -368,6 +370,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     if len(remote_block_descs_ids) > 0
                     else None,
                 )
+            if os.getenv("VLLM_NIXL_SYNC_BEFORE_TRANSFER") == "1":
+                sync_start = time.perf_counter()
+                torch.xpu.synchronize()
+                if PD_TRACE:
+                    logger.info(
+                        "PD_TRACE nixl_sync_before_transfer request_id=%s "
+                        "remote_rank=%s sync_ms=%.3f",
+                        request_id,
+                        remote_rank,
+                        (time.perf_counter() - sync_start) * 1000,
+                    )
+            self._recving_transfer_start[handle] = time.perf_counter()
             self.nixl_wrapper.transfer(handle)
 
             # Use handle to check completion in future step().

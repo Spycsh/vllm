@@ -34,6 +34,7 @@ class NixlKVConnectorStats(KVConnectorStats):
         # Must be serializable
         self.data: dict[str, list[float | int]] = {
             "transfer_duration": [],
+            "actual_transfer_duration": [],
             "post_duration": [],
             "bytes_transferred": [],
             "num_descriptors": [],
@@ -42,9 +43,15 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_kv_expired_reqs": [],
         }
 
-    def record_transfer(self, res: "nixlXferTelemetry"):
+    def record_transfer(
+        self, res: "nixlXferTelemetry", actual_duration_s: float | None = None
+    ):
         # Keep metrics units consistent with rest of the code: time us->s
-        self.data["transfer_duration"].append(res.xferDuration / 1e6)
+        transfer_duration_s = res.xferDuration / 1e6
+        self.data["transfer_duration"].append(transfer_duration_s)
+        self.data["actual_transfer_duration"].append(
+            actual_duration_s if actual_duration_s is not None else transfer_duration_s
+        )
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
         self.data["num_descriptors"].append(res.descCount)
@@ -90,16 +97,20 @@ class NixlKVConnectorStats(KVConnectorStats):
             # the interval were unsuccessful, Prom will report failures stats instead.
             return {
                 "Num successful transfers": 0,
+                "Avg actual xfer time (ms)": 0,
+                "P90 actual xfer time (ms)": 0,
                 "Avg xfer time (ms)": 0,
                 "P90 xfer time (ms)": 0,
                 "Avg post time (ms)": 0,
                 "P90 post time (ms)": 0,
                 "Avg MB per transfer": 0,
+                "Actual throughput (MB/s)": 0,
                 "Throughput (MB/s)": 0,
                 "Avg number of descriptors": 0,
             }
 
         xfer_time = np.asarray(self.data["transfer_duration"])
+        actual_xfer_time = np.asarray(self.data["actual_transfer_duration"])
         post_time = np.asarray(self.data["post_duration"])
         # Convert to MB for CLI logging.
         mb = np.asarray(self.data["bytes_transferred"]) / 2**20
@@ -110,17 +121,24 @@ class NixlKVConnectorStats(KVConnectorStats):
         total_mb = mb.sum()
         avg_mb = total_mb / n
 
-        total_time_seconds = xfer_time.sum()
-        throughput_mb_s = total_mb / total_time_seconds
+        total_actual_time_seconds = actual_xfer_time.sum()
+        actual_throughput_mb_s = total_mb / total_actual_time_seconds
+        total_telemetry_time_seconds = xfer_time.sum()
+        telemetry_throughput_mb_s = total_mb / total_telemetry_time_seconds
 
         return {
             "Num successful transfers": n,
+            "Avg actual xfer time (ms)": round(actual_xfer_time.mean() * 1e3, 3),
+            "P90 actual xfer time (ms)": round(
+                np.percentile(actual_xfer_time, 90).item() * 1e3, 3
+            ),
             "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
             "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
             "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
             "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb, 3),
-            "Throughput (MB/s)": round(throughput_mb_s, 3),
+            "Actual throughput (MB/s)": round(actual_throughput_mb_s, 3),
+            "Throughput (MB/s)": round(telemetry_throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
         }
 

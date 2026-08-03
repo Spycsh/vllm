@@ -84,6 +84,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 PD_TRACE = bool(int(os.environ.get("VLLM_PD_TRACE", "0")))
+POLL_TRACE = bool(int(os.environ.get("VLLM_NIXL_POLL_TRACE", "0")))
 
 
 class NixlBaseConnectorWorker:
@@ -459,11 +460,14 @@ class NixlBaseConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_metadata: dict[ReqId, ReqMeta] = {}
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        self._recving_transfer_start: dict[TransferHandle, float] = {}
         self._pd_trace_recv_start: dict[ReqId, float] = {}
         self._pd_trace_xfer_duration_us = defaultdict[ReqId, list[float]](list)
         self._pd_trace_xfer_post_us = defaultdict[ReqId, list[float]](list)
         self._pd_trace_xfer_bytes = defaultdict[ReqId, int](int)
         self._pd_trace_xfer_descs = defaultdict[ReqId, int](int)
+        self._pd_trace_xfer_poll_count = defaultdict[TransferHandle, int](int)
+        self._pd_trace_xfer_last_poll: dict[TransferHandle, float] = {}
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
         # Set of requests that have been part of a batch, regardless of status.
@@ -2146,10 +2150,47 @@ class NixlBaseConnectorWorker:
             in_progress = []
             for handle in handles:
                 try:
+                    poll_start = time.perf_counter()
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                    poll_end = time.perf_counter()
+                    start_time = self._recving_transfer_start.get(handle)
+                    since_start_ms = (
+                        (poll_end - start_time) * 1000
+                        if start_time is not None
+                        else -1.0
+                    )
+                    last_poll = self._pd_trace_xfer_last_poll.get(handle)
+                    since_last_poll_ms = (
+                        (poll_start - last_poll) * 1000
+                        if last_poll is not None
+                        else -1.0
+                    )
+                    self._pd_trace_xfer_last_poll[handle] = poll_end
+                    self._pd_trace_xfer_poll_count[handle] += 1
+                    poll_count = self._pd_trace_xfer_poll_count[handle]
+                    if POLL_TRACE:
+                        logger.info(
+                            "PD_TRACE nixl_xfer_poll request_id=%s handle=%s "
+                            "state=%s since_start_ms=%.3f "
+                            "since_last_poll_ms=%.3f check_us=%.3f "
+                            "poll_count=%s",
+                            req_id,
+                            handle,
+                            xfer_state,
+                            since_start_ms,
+                            since_last_poll_ms,
+                            (poll_end - poll_start) * 1e6,
+                            poll_count,
+                        )
                     if xfer_state == "DONE":
                         # Get telemetry from NIXL
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        start_time = self._recving_transfer_start.pop(handle, None)
+                        actual_duration_s = (
+                            time.perf_counter() - start_time
+                            if start_time is not None
+                            else None
+                        )
                         if PD_TRACE:
                             self._pd_trace_xfer_duration_us[req_id].append(
                                 res.xferDuration
@@ -2157,12 +2198,33 @@ class NixlBaseConnectorWorker:
                             self._pd_trace_xfer_post_us[req_id].append(res.postDuration)
                             self._pd_trace_xfer_bytes[req_id] += res.totalBytes
                             self._pd_trace_xfer_descs[req_id] += res.descCount
-                        self.xfer_stats.record_transfer(res)
+                            logger.info(
+                                "PD_TRACE nixl_xfer_done request_id=%s handle=%s "
+                                "actual_ms=%.3f telemetry_xfer_ms=%.3f "
+                                "telemetry_post_ms=%.3f bytes=%s descs=%s "
+                                "poll_count=%s last_check_us=%.3f",
+                                req_id,
+                                handle,
+                                actual_duration_s * 1000
+                                if actual_duration_s is not None
+                                else -1.0,
+                                res.xferDuration / 1000,
+                                res.postDuration / 1000,
+                                res.totalBytes,
+                                res.descCount,
+                                poll_count,
+                                (poll_end - poll_start) * 1e6,
+                            )
+                        self.xfer_stats.record_transfer(res, actual_duration_s)
                         self.nixl_wrapper.release_xfer_handle(handle)
+                        self._pd_trace_xfer_poll_count.pop(handle, None)
+                        self._pd_trace_xfer_last_poll.pop(handle, None)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
                         continue
                     else:
+                        self._pd_trace_xfer_poll_count.pop(handle, None)
+                        self._pd_trace_xfer_last_poll.pop(handle, None)
                         self._log_failure(
                             failure_type="transfer_failed",
                             msg="Marking blocks as invalid",
@@ -2202,6 +2264,7 @@ class NixlBaseConnectorWorker:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
         if handle is not None:
+            self._recving_transfer_start.pop(handle, None)
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
 
@@ -2502,8 +2565,10 @@ class NixlBaseConnectorWorker:
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
+                self._recving_transfer_start.pop(handle, None)
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
+        self._recving_transfer_start.clear()
         for handle in self.src_xfer_handles_by_block_size.values():
             self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_block_size.clear()
