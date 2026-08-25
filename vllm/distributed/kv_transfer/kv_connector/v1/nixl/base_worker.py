@@ -1013,6 +1013,7 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            nixl_memory_type=self.nixl_memory_type,
         )
         assert self.compat_hash is not None
         encoder = msgspec.msgpack.Encoder()
@@ -1265,6 +1266,7 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            nixl_memory_type=self.nixl_memory_type,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1656,7 +1658,18 @@ class NixlBaseConnectorWorker:
             blocks_data = np.concatenate([blocks_data, mamba])
 
         # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        remote_nixl_memory_type = (
+            nixl_agent_meta.nixl_memory_type or self.nixl_memory_type
+        )
+        logger.info(
+            "Preparing remote NIXL descriptors: local_memory_type=%s, "
+            "remote_memory_type=%s, local_buffer_device=%s, remote_device_id=%s",
+            self.nixl_memory_type,
+            remote_nixl_memory_type,
+            self.kv_buffer_device,
+            nixl_agent_meta.device_id,
+        )
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, remote_nixl_memory_type)
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )

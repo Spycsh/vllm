@@ -41,8 +41,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   4: Add KV block lease renewal through heartbeats
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
+#   6: Add NIXL memory type to agent metadata for heterogeneous buffer devices
 #
-NIXL_CONNECTOR_VERSION: int = 5
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
@@ -58,6 +59,7 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    nixl_memory_type: str = ""
 
 
 @dataclass
